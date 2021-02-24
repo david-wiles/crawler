@@ -1,6 +1,7 @@
 package crawler
 
 import (
+	"net/http"
 	"net/url"
 	"regexp"
 	"time"
@@ -54,7 +55,7 @@ func (opt *RegexpURLOption) SetOption(c *Crawler) error {
 			return false
 		}
 
-		// Check url against all excluded regexps
+		// Check url against all regexps
 		// If one matches, we should follow the link
 		for _, re := range regexps {
 			if re.MatchString(u.String()) {
@@ -63,6 +64,44 @@ func (opt *RegexpURLOption) SetOption(c *Crawler) error {
 		}
 
 		return false
+	})
+	return nil
+}
+
+type RegexpExclusionsOption struct {
+	Regexp []string
+}
+
+func (opt *RegexpExclusionsOption) SetOption(c *Crawler) error {
+	// Create map of regexps
+	regexps := []*regexp.Regexp{}
+
+	for _, exp := range opt.Regexp {
+		re, err := regexp.Compile(exp)
+		if err != nil {
+			return err
+		}
+
+		regexps = append(regexps, re)
+	}
+
+	c.followRules = append(c.followRules, func(c *Crawler, href string) bool {
+		// Search for the hostname in the excluded regexps, return true if not found
+		u, err := url.Parse(href)
+		if err != nil {
+			// Can't follow the link if we wanted to
+			return false
+		}
+
+		// Check url against all excluded regexps
+		// If one matches, we should not follow the link
+		for _, re := range regexps {
+			if re.MatchString(u.String()) {
+				return false
+			}
+		}
+
+		return true
 	})
 	return nil
 }
@@ -90,7 +129,7 @@ type DelayOption struct {
 }
 
 func (opt *DelayOption) SetOption(c *Crawler) error {
-	c.domainMap = NewDomainMap(2048, opt.Delay)
+	c.domainMap = NewDomainMap(65535, opt.Delay)
 	c.followRules = append(c.followRules, func(c *Crawler, u string) bool {
 		// Sleep specified amount of time to ensure delay
 		parsed, err := url.Parse(u)
@@ -105,7 +144,7 @@ func (opt *DelayOption) SetOption(c *Crawler) error {
 			// If this domain was requested in the past delay time, push it to the back
 			// of the queue and return false so this worker can handle a different URL
 			if prev.Add(opt.Delay).After(now) {
-				c.Queue.Add(u)
+				c.Queue.PushBack(u)
 				return false
 			}
 		}
@@ -124,5 +163,29 @@ type WorkerCountOption struct {
 func (opt *WorkerCountOption) SetOption(c *Crawler) error {
 	c.NumWorkers = opt.Count
 	c.wPoll = make(chan bool, opt.Count)
+	return nil
+}
+
+type QueueOption struct {
+	Queue
+}
+
+func (opt *QueueOption) SetOption(c *Crawler) error {
+	c.Queue = opt.Queue
+	return nil
+}
+
+type HeadersOption struct {
+	Headers map[string]string
+}
+
+// Set headers to send on every request
+func (opt *HeadersOption) SetOption(c *Crawler) error {
+	c.requestRules = append(c.requestRules, func(c *Crawler, req *http.Request) error {
+		for k, v := range opt.Headers {
+			req.Header.Set(k, v)
+		}
+		return nil
+	})
 	return nil
 }

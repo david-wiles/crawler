@@ -1,7 +1,11 @@
 package main
 
 import (
+	"compress/flate"
+	"compress/gzip"
+	"database/sql"
 	"flag"
+	"io"
 	"io/ioutil"
 	"net/http"
 	"net/url"
@@ -10,8 +14,8 @@ import (
 	"strings"
 	"time"
 
+	_ "github.com/ClickHouse/clickhouse-go"
 	"github.com/PuerkitoBio/goquery"
-
 	"github.com/david-wiles/crawl-project"
 )
 
@@ -59,51 +63,78 @@ func GetURL(prev *url.URL, link string) string {
 func main() {
 
 	var (
-		delay time.Duration
-		//headers         = make(map[string]string)
-		//startUrls       []string
-		//excludedDomains []string
+		//headers          = make(map[string]string)
+		startUrls        []string
+		exclusionsRegexp []string
 	)
 
-	flag.DurationVar(&delay, "delay", 0, "Delay between requests to identical domains")
-
-	// Parse header flags
-
 	// Start and excluded urls from files
-	//startUrlsFileFlag := flag.String("start", "", "Start urls")
-	//exclusions := flag.String("excluded", "", "Excluded url regexp")
+	delayFlag := flag.String("delay", "", "Delay duration between identical domains")
+	startUrlsFileFlag := flag.String("start", "", "Start urls")
+	exclusions := flag.String("excluded", "", "Excluded url regexp")
+	clickhouseFlag := flag.String("db", "", "Database connection string")
 
 	flag.Parse()
 
-	// Parse start and excluded urls from files
-	//startUrls = SplitListFiles(*startUrlsFileFlag)
-	//excludedDomains = SplitListFiles(*exclusions)
+	// Parse values from flags
+	dur, err := time.ParseDuration(*delayFlag)
+	if err != nil {
+		panic(err)
+	}
+	startUrls = SplitListFiles(*startUrlsFileFlag)
+	exclusionsRegexp = SplitListFiles(*exclusions)
+
+	conn, err := sql.Open("clickhouse", *clickhouseFlag)
+	if err != nil {
+		panic(err)
+	}
+
+	// Test connection
+	if err := conn.Ping(); err != nil {
+		panic(err)
+	}
 
 	// Start crawler with config
 	c := crawler.NewCrawler()
 	c.Must(
-		&crawler.StartUrlsOption{[]string{
-			"https://www.wku.edu",
-			"https://www.eku.edu",
-			"https://www.nku.edu",
-			"https://www.uky.edu",
+		&crawler.QueueOption{crawler.NewQueue(65535)},
+		&crawler.StartUrlsOption{startUrls},
+		&crawler.RegexpExclusionsOption{exclusionsRegexp},
+		&crawler.HeadersOption{map[string]string{
+			"Accept":                    "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+			"Upgrade-Insecure-Requests": "1",
+			"Accept-Language":           "en-us",
+			"Accept-Encoding":           "gzip, deflate",
+			"User-Agent":                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Safari/605.1.15",
 		}},
-		&crawler.RegexpURLOption{[]string{"https://.*"}},
 		&crawler.ResponseFuncOption{[]crawler.ResponseFunc{
-			func(c *crawler.Crawler, resp *http.Response) bool {
-				// write URL and status code to stdout
-				_, _ = os.Stdout.WriteString(resp.Request.URL.String() + " " + resp.Status + "\n")
-				return true
-			},
 			func(c *crawler.Crawler, resp *http.Response) bool {
 				defer resp.Body.Close()
 
-				doc, err := goquery.NewDocumentFromReader(resp.Body)
+				var (
+					reader io.ReadCloser
+					err    error
+				)
+				switch resp.Header.Get("Content-Encoding") {
+				case "gzip":
+					reader, err = gzip.NewReader(resp.Body)
+					if err != nil {
+						c.Errors <- err
+						return false
+					}
+				case "deflate":
+					reader = flate.NewReader(resp.Body)
+				default:
+					reader = resp.Body
+				}
+
+				doc, err := goquery.NewDocumentFromReader(io.LimitReader(reader, 20000000))
 				if err != nil {
 					c.Errors <- err
 					return false
 				}
 
+				// Add links to queue
 				doc.Find("a").Each(func(i int, el *goquery.Selection) {
 					if href, ok := el.Attr("href"); ok {
 						u := GetURL(resp.Request.URL, href)
@@ -115,8 +146,13 @@ func main() {
 
 				return true
 			},
+			func(c *crawler.Crawler, resp *http.Response) bool {
+				// write URL and status code to stdout
+				_, _ = os.Stdout.WriteString(resp.Request.URL.String() + " " + resp.Status + "\n")
+				return true
+			},
 		}},
-		&crawler.DelayOption{time.Second * 3},
+		&crawler.DelayOption{dur},
 	)
 	c.Start()
 }

@@ -34,6 +34,7 @@ type Crawler struct {
 
 	// Rules used by the engine to process urls and responses
 	followRules   []FollowFunc
+	requestRules  []RequestFunc
 	responseRules []ResponseFunc
 
 	rMu       *sync.Mutex
@@ -50,10 +51,11 @@ func NewCrawler() *Crawler {
 		Client:          http.DefaultClient,
 		NumWorkers:      runtime.NumCPU(),
 		Errors:          make(chan error),
-		Queue:           NewQueue(),
+		Queue:           NewQueue(65335),
 		Completed:       make(chan bool),
 		DuplicateFilter: &InMemoryDupFilter{},
 		followRules:     []FollowFunc{},
+		requestRules:    []RequestFunc{},
 		responseRules:   []ResponseFunc{},
 		domainMap:       NewDomainMap(2048, 0),
 		wPoll:           make(chan bool, runtime.NumCPU()),
@@ -74,14 +76,14 @@ func (c *Crawler) Must(opts ...CrawlOption) {
 // the crawler will only follow the link if all are true
 type FollowFunc func(*Crawler, string) bool
 
+// Function used to modify a request before its sent
+// Each function in the chain will be called unless one returns false,
+// and then the request will be cancelled
+type RequestFunc func(*Crawler, *http.Request) error
+
 // ResponseFunc handles the HTTP response from a single request. Each function
 // in the chain is evaluated as long as the previous one returns true
 type ResponseFunc func(*Crawler, *http.Response) bool
-
-// DownloadFunc's are called to handle the download of content after the initial
-// response has been processed. Each DownloadFunc assigned to a crawler will be
-// called, unless a download func in the chain returns false
-type DownloadFunc func(*Crawler, *http.Response) bool
 
 func (c *Crawler) Start() {
 	// Fill worker poller with messages since all workers are available
@@ -134,9 +136,6 @@ func (c *Crawler) shouldFollowURL(u string) bool {
 // Send the work to the first available worker
 // When a worker is ready for a new URL, it polls for a new URL
 func (c *Crawler) sendWork(u string) {
-	if !c.shouldFollowURL(u) {
-		return
-	}
 	<-c.wPoll
 	go c.crawlURL(u)
 }
@@ -145,6 +144,10 @@ func (c *Crawler) crawlURL(u string) {
 	// Notify the main thread that the worker is ready to accept
 	// work regardless of where the thread returns
 	defer c.notifyReady()
+	if !c.shouldFollowURL(u) {
+		return
+	}
+
 	resp, err := c.doRequest(u)
 	if err != nil {
 		c.Errors <- err
@@ -165,7 +168,12 @@ func (c *Crawler) doRequest(u string) (*http.Response, error) {
 		return nil, err
 	}
 
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Safari/605.1.15")
+	for _, fn := range c.requestRules {
+		if err := fn(c, req); err != nil {
+			return nil, err
+		}
+	}
+
 	return c.Client.Do(req)
 }
 
