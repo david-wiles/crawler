@@ -13,8 +13,27 @@ type Queue interface {
 	Close()
 }
 
+// DefaultQueue is an in-memory implementation of Queue
+// This is used by default if a custom implementation is not
+// specified by an Option
 type DefaultQueue struct {
-	isOpen      bool
+
+	// Indicates whether this queue will accept new URLs
+	isOpen bool
+
+	// This queue uses channels to send URLs to worker processes and
+	// a slice to store URLs until they are needed.
+	//
+	//queue is the default channel used to send to workers
+	//
+	// urgentQueue is only used if
+	// 1: a thread is blocked while waiting to get a URL
+	// 2: another thread is simultaneously trying to send
+	//
+	// Normally, adding to the queue will put a URL in the back of the
+	// in-memory slice. If a thread is waiting on a URL, it would be
+	// deadlocked until a different thread called Get() and triggered
+	// a flush of the slice to the channel
 	queue       chan string
 	urgentQueue chan string
 	mu          *sync.Mutex
@@ -27,7 +46,7 @@ type DefaultQueue struct {
 func NewQueue(maxSize int) *DefaultQueue {
 	return &DefaultQueue{
 		isOpen:      true,
-		queue:       make(chan string, 4),
+		queue:       make(chan string, maxSize),
 		urgentQueue: make(chan string),
 		mu:          &sync.Mutex{},
 		memory:      []string{},
@@ -36,6 +55,10 @@ func NewQueue(maxSize int) *DefaultQueue {
 	}
 }
 
+// Add a new URL to the back of the queue
+// If the queue is closed, the function will return and no URL will be added
+// If a receiver is waiting on urgentQueue, the URL will go directly to the channel
+// Otherwise, the URL will be added to memory
 func (q *DefaultQueue) Add(u string) {
 	if !q.isOpen {
 		return

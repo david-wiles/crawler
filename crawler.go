@@ -85,7 +85,7 @@ type RequestFunc func(*Crawler, *http.Request) error
 // in the chain is evaluated as long as the previous one returns true
 type ResponseFunc func(*Crawler, *http.Response) bool
 
-func (c *Crawler) Start() {
+func (c *Crawler) Start() <-chan bool {
 	// Fill worker poller with messages since all workers are available
 	// Once a worker is finished with a request, it will send a message
 	// indicating that the worker is ready to accept more work
@@ -95,16 +95,20 @@ func (c *Crawler) Start() {
 
 	go c.consumeErrors()
 
-	// Consume all URLs in the queue
-	// sendWork will block until a worker is ready to accept the url
-	u, ok := c.Queue.Get()
-	for ok {
-		c.sendWork(u)
-		u, ok = c.Queue.Get()
-	}
+	go func() {
+		// Consume all URLs in the queue
+		// sendWork will block until a worker is ready to accept the url
+		u, ok := c.Queue.Get()
+		for ok {
+			c.sendWork(u)
+			u, ok = c.Queue.Get()
+		}
 
-	// Send message indicating that all URLs have finished processing.
-	c.Completed <- true
+		// Send message indicating that all URLs have finished processing.
+		c.Completed <- true
+	}()
+
+	return c.Completed
 }
 
 // Abort a crawl by closing URL queue
